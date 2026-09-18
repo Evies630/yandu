@@ -834,12 +834,12 @@ window.ocrBook=async function(){
   toast('整本识别完成'); await renderPage();
 };
 function paraHtml(raw,i,mats){
-  let out=raw;
+  let out=esc(raw);
   mats.filter(m=>m.kind==='highlight'&&m.para===i).forEach(m=>{
-    const q=m.quote; const idx=out.indexOf(q);
-    if(idx>=0){ const cls=(m.color==='g'?' mark g':m.color==='b'?' mark b':' mark'); out=out.slice(0,idx)+'<mark class="'+cls+'">'+out.slice(idx,idx+q.length)+'</mark>'+out.slice(idx+q.length); }
+    const qesc=esc(m.quote); const idx=out.indexOf(qesc);
+    if(idx>=0){ const cls=(m.color==='g'?'g':m.color==='b'?'b':''); out=out.slice(0,idx)+'<mark'+(cls?' class="'+cls+'"':' class="mark"')+'>'+out.slice(idx,idx+qesc.length)+'</mark>'+out.slice(idx+qesc.length); }
   });
-  let html='<p class="para" data-idx="'+i+'">'+esc(out)+'</p>';
+  let html='<p class="para" data-idx="'+i+'">'+out+'</p>';
   mats.filter(m=>m.kind==='note'&&m.para===i).forEach(m=>{
     html+='<div class="note-inline"><b>我的批注</b>　'+esc(m.note)+
       '<div style="font-size:12px;color:var(--muted);margin-top:3px">'+esc(m.bookTitle)+' · 第'+m.page+'页 · <button class="btn sm" data-delmat="'+m.id+'" style="color:var(--danger);padding:0;background:none;border:none;font-size:12px">删除批注</button></div></div>';
