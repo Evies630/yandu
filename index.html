@@ -81,6 +81,16 @@ main{padding:18px}
 .para mark.b{background:var(--blue)}
 .para:hover{background:var(--surface2);box-shadow:0 0 0 3px var(--surface2);border-radius:4px;cursor:text}
 .para.selected{background:var(--brand-soft);box-shadow:0 0 0 3px var(--brand-soft)}
+/* PDF 原文视图：画布 + 文字层 */
+.textLayer{position:absolute;left:0;top:0;line-height:1;text-align:initial;overflow:hidden}
+.textLayer span{position:absolute;white-space:pre;cursor:text;transform-origin:0 0;color:transparent}
+.textLayer ::selection{background:rgba(24,122,255,.32)}
+.textLayer span.hl{color:rgba(0,0,0,.01);background:rgba(255,234,120,.62);border-radius:2px}
+.textLayer span.hl.g{background:rgba(144,238,144,.55)}
+.textLayer span.hl.b{background:rgba(173,216,255,.62)}
+.mode-switch{display:flex;gap:4px;background:var(--surface2);border-radius:8px;padding:3px}
+.mode-switch button{border:none;background:transparent;padding:5px 12px;border-radius:6px;color:var(--muted);font-size:13px}
+.mode-switch button.on{background:var(--surface);color:var(--brand);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.08)}
 .reader-tools{display:flex;gap:6px;flex-wrap:wrap;margin-top:14px}
 .reader-tools.on{border-top:1px solid var(--line);padding-top:12px}
 #selBar{position:fixed;z-index:60;display:none;gap:4px;flex-wrap:wrap;background:var(--ink);padding:8px;border-radius:12px;box-shadow:0 6px 20px rgba(0,0,0,.28);max-width:94vw}
@@ -147,6 +157,10 @@ textarea.txt-in{border:1px solid var(--line);border-radius:8px;padding:8px 12px;
   <section id="view-reader" class="view">
     <div class="reader-bar">
       <div class="rtitle" id="rTitle">请先从书库打开一本书</div>
+      <div class="mode-switch" id="modeSwitch" style="display:none">
+        <button id="modePdf" class="on">PDF 原文</button>
+        <button id="modePlain">排版阅读</button>
+      </div>
       <div class="page-ctrl">
         <button class="btn sm" id="pgPrev">上一页</button>
         <span id="pgLabel">– / –</span>
@@ -285,7 +299,7 @@ let pdfjsReady=null;
 function ensurePdfjs(){
   if(window.pdfjsLib) return Promise.resolve();
   if(pdfjsReady) return pdfjsReady;
-  const base='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
+  const base='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/';
   pdfjsReady=loadScript(base+'pdf.min.js').then(()=>{ pdfjsLib.GlobalWorkerOptions.workerSrc=base+'pdf.worker.min.js'; });
   return pdfjsReady;
 }
@@ -428,6 +442,7 @@ function splitParas(text){
   return out.filter(x=>x.length);
 }
 async function openBook(b){
+  if(b.view==null) b.view=(b.kind==='text'?'pdf':'plain');
   CURRENT.book=b; CURRENT.page=1;
   $$('.nav button').forEach(x=>x.classList.remove('active'));
   const navBtn=$$('.nav button').find(x=>x.dataset.view==='reader');
@@ -443,6 +458,7 @@ function refreshReaderHeader(){
   $('pgLabel').textContent=CURRENT.page+' / '+(CURRENT.book.numPages||'?');
   $('pgHeadBook').textContent=CURRENT.book.title+(CURRENT.book.author?'　'+CURRENT.book.author:'');
   $('pgKind').textContent=CURRENT.book.kind==='scan'?'扫描版（可 OCR）':'文本文档';
+  updateModeSwitch();
 }
 $('pgPrev').addEventListener('click',()=>gotoPage(CURRENT.page-1));
 $('pgNext').addEventListener('click',()=>gotoPage(CURRENT.page+1));
@@ -452,7 +468,91 @@ async function gotoPage(p){
   if(p<1)p=1; if(p>max)p=max;
   CURRENT.page=p; refreshReaderHeader(); await renderPage();
 }
+function updateModeSwitch(){
+  const sw=$('modeSwitch');
+  if(CURRENT.book && CURRENT.book.kind==='text'){ sw.style.display='flex'; }
+  else { sw.style.display='none'; return; }
+  const view=CURRENT.book.view==='plain'?'plain':'pdf';
+  $('modePdf').classList.toggle('on',view==='pdf');
+  $('modePlain').classList.toggle('on',view==='plain');
+}
+$('modePdf').addEventListener('click',async()=>{ if(!CURRENT.book)return; CURRENT.book.view='pdf'; await dbPut('books',CURRENT.book); updateModeSwitch(); await renderPage(); });
+$('modePlain').addEventListener('click',async()=>{ if(!CURRENT.book)return; CURRENT.book.view='plain'; await dbPut('books',CURRENT.book); updateModeSwitch(); await renderPage(); });
+
+/* ===== PDF 原文视图：画布 + 文字层，直接在原 PDF 上选取批注 ===== */
+let pdfDocCache=null, pdfCacheBookId=null;
+async function getPdfDoc(book){
+  if(pdfDocCache && pdfCacheBookId===book.id) return pdfDocCache;
+  await ensurePdfjs();
+  const store=await dbGet('pages',book.id);
+  pdfDocCache=await pdfjsLib.getDocument({data: await store.blob.arrayBuffer()}).promise;
+  pdfCacheBookId=book.id;
+  return pdfDocCache;
+}
+const _norm2=s=>(s||'').replace(/\s+/g,'');
+function mapQuoteToSpans(spans,quote){
+  const q=_norm2(quote); if(!q||!spans.length) return [];
+  let cum='';
+  const beginBy=[];
+  spans.forEach((sp,i)=>{ beginBy[i]=cum.length; cum+=_norm2(sp.textContent); });
+  const hit=cum.indexOf(q); if(hit<0) return [];
+  const end=hit+q.length, out=[];
+  for(let i=0;i<spans.length;i++){
+    const s=beginBy[i], e=s+_norm2(spans[i].textContent).length;
+    if(e<=hit||s>=end) continue;
+    out.push(i);
+  }
+  return out;
+}
+async function renderPagePdf(){
+  const b=CURRENT.book; const body=$('readingBody');
+  const pdf=await getPdfDoc(b);
+  const page=await pdf.getPage(CURRENT.page);
+  const baseVp=page.getViewport({scale:1});
+  const maxW=Math.min(($('reading-card').clientWidth||820)-24,760);
+  const scale=Math.max(0.4,Math.min(maxW/baseVp.width,1.7));
+  const vp=page.getViewport({scale});
+  body.innerHTML='';
+  const pageHead=el('<div class="page-head"><span>第 '+CURRENT.page+' 页 · PDF 原文</span><span>'+(b.title||'')+'</span></div>');
+  body.appendChild(pageHead);
+  const holder=el('<div class="pdfpage" style="position:relative;width:'+vp.width+'px;margin:0 auto;border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow);background:#fff;overflow:hidden"></div>');
+  const canvas=document.createElement('canvas'); canvas.width=vp.width; canvas.height=vp.height;
+  canvas.style.cssText='display:block;width:'+vp.width+'px;height:'+vp.height+'px';
+  holder.appendChild(canvas);
+  await page.render({canvasContext:canvas.getContext('2d'),viewport:vp}).promise;
+  const tld=el('<div class="textLayer" style="position:absolute;left:0;top:0;width:'+vp.width+'px;height:'+vp.height+'px"></div>');
+  holder.appendChild(tld);
+  const textContent=await page.getTextContent();
+  if(textContent && textContent.items && textContent.items.length){
+    const textDivs=[];
+    const rr=pdfjsLib.renderTextLayer({textContent,viewport:vp,container:tld,textDivs});
+    if(rr&&rr.promise){ try{ await rr.promise; }catch(e){ console.warn('textLayer',e); } }
+  }
+  const spans=Array.prototype.slice.call(tld.querySelectorAll('span'));
+  spans.forEach((s,i)=>{ s.dataset.idx=i; });
+  // 回显已有高亮
+  const hl=(await dbAll('materials')).filter(m=>m.bookId===b.id&&m.page===CURRENT.page&&m.kind==='highlight');
+  hl.forEach(m=>{
+    let target=(m.spans&&m.spans.length)?m.spans:mapQuoteToSpans(spans,m.quote);
+    const cls='hl'+(m.color==='g'?' g':m.color==='b'?' b':'');
+    target.forEach(i=>{ const sp=spans[i]; if(sp) sp.classList.add(cls); });
+  });
+  body.appendChild(holder);
+  // 本页批注列在页图下方
+  const notes=(await dbAll('materials')).filter(m=>m.bookId===b.id&&m.page===CURRENT.page&&m.kind==='note');
+  if(notes.length){
+    body.insertAdjacentHTML('beforeend', notes.map(n=>`<div class="note-inline" style="max-width:760px;margin:10px auto 0"><b>我的批注</b>　${esc(n.note||'')}<div style="font-size:12px;color:var(--muted);margin-top:3px">这段 · 第${n.page}页 · <button class="btn sm" data-delmat="${n.id}" style="color:var(--danger);padding:0;background:none;border:none;font-size:12px">删除批注</button></div></div>`).join(''));
+  }
+  const numPages=b.numPages||pdf.numPages||1;
+  body.insertAdjacentHTML('beforeend',`<div class="page-nav" style="max-width:760px;margin:14px auto 0"><button class="btn" ${CURRENT.page<=1?'disabled':''} onclick="gotoPage(${CURRENT.page-1})">← 上一页</button><button class="btn" ${CURRENT.page>=numPages?'disabled':''} onclick="gotoPage(${CURRENT.page+1})">下一页 →</button></div>`);
+}
+/* ===== 阅读分发：PDF 原文 vs 排版 ===== */
 async function renderPage(){
+  if(!CURRENT.book) return;
+  if(CURRENT.book.kind==='text' && CURRENT.book.view!=='plain'){ await renderPagePdf(); return; }
+  await renderPagePlain();
+}
+async function renderPagePlain(){
   if(!CURRENT.book) return;
   const store=await dbGet('pages',CURRENT.book.id);
   const body=$('readingBody');
@@ -525,14 +625,24 @@ let SEL=null, _selTimer=null;
 function closestPara(node){ while(node&&node!==document){ if(node.classList&&node.classList.contains('para')) return node; node=node.parentNode; } return null; }
 const _rBody=$('readingBody');
 function hideSelBar(){ const b=$('selBar'); b.style.display='none'; }
+function boxOf(n){ if(!n) return null; return n.nodeType===1?n:n.parentElement; }
+function selectedSpanIdxs(){
+  const sel=window.getSelection(); if(!sel||!sel.rangeCount) return [];
+  const r=sel.getRangeAt(0); const spans=_rBody.querySelectorAll('.textLayer span'); const out=[];
+  for(let i=0;i<spans.length;i++){ if(r.intersectsNode(spans[i])) out.push(i); }
+  return out;
+}
 function maybeShowBar(){
   const sel=window.getSelection();
   if(!sel||sel.isCollapsed||!sel.rangeCount){ hideSelBar(); return; }
-  const paraEl=closestPara(sel.anchorNode)||closestPara(sel.focusNode);
-  if(!paraEl||!_rBody.contains(paraEl)){ hideSelBar(); return; }
+  const aBox=boxOf(sel.anchorNode), fBox=boxOf(sel.focusNode);
+  const paraEl=(aBox&&aBox.closest('.para'))||closestPara(sel.anchorNode)||(fBox&&fBox.closest('.para'));
+  const inPdf=!!((aBox&&aBox.closest('.pdfpage'))||(fBox&&fBox.closest('.pdfpage')));
+  if((!paraEl&&!inPdf)||(!_rBody.contains(paraEl||aBox)&&!inPdf)){ hideSelBar(); return; }
   const q=sel.toString().replace(/\s+/g,' ').trim();
   if(!q||q.length>700){ hideSelBar(); return; }
-  SEL={quote:q,page:CURRENT.page,para:+paraEl.dataset.idx};
+  if(inPdf){ SEL={quote:q,page:CURRENT.page,spans:selectedSpanIdxs()}; }
+  else { SEL={quote:q,page:CURRENT.page,para:paraEl?+paraEl.dataset.idx:0}; }
   const bar=$('selBar'); bar.style.display='flex';
   bar.innerHTML='<button data-a="hl">高亮</button><button data-a="note">批注</button><button data-a="fav">收藏</button><button data-a="tr">翻译</button><button data-a="ask">问 AI</button>';
   const rect=sel.getRangeAt(0).getBoundingClientRect();
@@ -552,9 +662,9 @@ $('selBar').addEventListener('mousedown',e=>e.preventDefault());
 $('selBar').addEventListener('click',async e=>{
   const tb=e.target.closest('button'); if(!tb||!SEL)return;
   const a=tb.dataset.a;
-  if(a==='hl'){ await addMaterial({kind:'highlight',color:'y',note:'',quote:SEL.quote}); renderPage(); toast('已高亮'); }
+  if(a==='hl'){ await addMaterial({kind:'highlight',color:'y',note:'',quote:SEL.quote,spans:SEL.spans,para:SEL.para}); renderPage(); toast('已高亮'); }
   else if(a==='note'){ openNoteModal(SEL.quote); }
-  else if(a==='fav'){ await addMaterial({kind:'material',note:'',quote:SEL.quote}); renderPage(); toast('已收藏为素材'); }
+  else if(a==='fav'){ await addMaterial({kind:'material',note:'',quote:SEL.quote,spans:SEL.spans,para:SEL.para}); renderPage(); toast('已收藏为素材'); }
   else if(a==='tr'){ openTranslateModal(SEL.quote); }
   else if(a==='ask'){ openAskModal(SEL.quote); }
   hideSelBar();
@@ -564,8 +674,8 @@ async function addMaterial(o){
   await dbPut('materials',Object.assign({
     id:uid(),bookId:CURRENT.book.id,bookTitle:CURRENT.book.title||'',
     author:CURRENT.book.author||'',year:CURRENT.book.year||'',publisher:CURRENT.book.publisher||'',city:CURRENT.book.city||'',
-    page:CURRENT.page,topic:'未分类',tags:[],createdAt:Date.now(),note:'',quote:'',kind:'material',para:null,color:'y',srcLang:'',tgtLang:''
-  },o,{bookId:CURRENT.book.id,bookTitle:CURRENT.book.title||'',author:CURRENT.book.author||'',year:CURRENT.book.year||'',publisher:CURRENT.book.publisher||'',city:CURRENT.book.city||'',page:CURRENT.page,quote:o.quote,para}));
+    page:CURRENT.page,topic:'未分类',tags:[],createdAt:Date.now(),note:'',quote:'',kind:'material',para:null,spans:null,color:'y',srcLang:'',tgtLang:''
+  },o,{bookId:CURRENT.book.id,bookTitle:CURRENT.book.title||'',author:CURRENT.book.author||'',year:CURRENT.book.year||'',publisher:CURRENT.book.publisher||'',city:CURRENT.book.city||'',page:CURRENT.page,quote:o.quote,para,spans:o.spans||null}));
 }
 
 /* 批注弹窗 */
