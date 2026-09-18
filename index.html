@@ -119,6 +119,14 @@ main{padding:18px 20px 60px}
 #selBar button{background:rgba(255,255,255,.16);border:none;color:#fff;font-size:13.5px;padding:9px 12px;border-radius:9px;white-space:nowrap}
 #selBar button:hover,#selBar button:active{background:rgba(255,255,255,.32)}
 #selBar button.x{background:transparent;padding:6px 8px;color:rgba(255,255,255,.6);font-size:15px}
+/* ===== 微信读书式选取：逐字单元 / 拖动手柄 / 放大镜 ===== */
+.para .u{display:inline;cursor:text}
+#readingBody .u.sel,#readingBody .ow.sel{background:rgba(14,140,104,.24);border-radius:2px;box-shadow:0 0 0 1px rgba(14,140,104,.14)}
+#selH0,#selH1{position:fixed;width:22px;height:22px;margin-left:-11px;margin-top:-11px;z-index:81;visibility:hidden;cursor:grab;touch-action:none;pointer-events:auto}
+#selH0::before,#selH1::before{content:"";position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:16px;height:16px;border-radius:50%;background:#0E8C68;border:3px solid #fff;box-shadow:0 3px 8px rgba(0,0,0,.28)}
+#selH0::after,#selH1::after{content:"";position:absolute;left:50%;top:50%;width:2px;height:26px;background:rgba(14,140,104,.55);transform:translate(-50%,-50%)}
+#selMag{position:fixed;z-index:82;pointer-events:none;display:none;font-size:21px;color:#222;background:rgba(255,255,255,.97);border:1px solid var(--line);border-radius:8px;padding:6px 10px;box-shadow:0 10px 26px rgba(0,0,0,.28);line-height:1;white-space:nowrap}
+#selMag::after{content:"";position:absolute;left:50%;top:100%;transform:translateX(-50%);border:6px solid transparent;border-top-color:#fff}
 .page-nav{display:flex;justify-content:space-between;gap:10px;margin-top:18px}
 .note-inline{background:var(--brand-soft);border-left:3px solid var(--brand);border-radius:8px;padding:9px 13px;margin:6px 0 12px;font-size:14px;color:var(--ink2)}
 .note-inline b{color:var(--brand-text)}
@@ -308,6 +316,7 @@ main#readerBg{background:linear-gradient(180deg,#F6F7F6,var(--bg2) 260px)}
 </main>
 
 <div id="selBar"></div>
+    <div id="selH0"></div><div id="selH1"></div><div id="selMag"></div>
 <div id="toast"></div>
 <div id="modalMask">
   <div class="modal" id="modalBox"></div>
@@ -575,11 +584,17 @@ function repairText(t){
 }
 function splitParas(text){
   if(!text) return [];
-  const parts=String(text).split(/(?<=[。！？；！?；…])[\s\n]*/);
-  const out=[]; let cur='';
-  for(const p of parts){ cur+=' '+p; if(cur.trim().length>=16){ out.push(cur.trim()); cur=''; } }
-  if(cur.trim()) out.push(cur.trim());
-  return out.filter(x=>x.length);
+  const out=[]; let paraIdx=0;
+  // 先按空行切出“逻辑段落”，再在段内按句切块显示
+  const lps=String(text).split(/\n\s*\n/);
+  for(const lp of lps){
+    const parts=String(lp).split(/(?<=[。！？；！?；…])[\s\n]*/);
+    let cur='';
+    for(const p of parts){ cur+=' '+p; if(cur.trim().length>=16){ out.push({text:cur.trim(),para:paraIdx}); cur=''; } }
+    if(cur.trim()) out.push({text:cur.trim(),para:paraIdx});
+    paraIdx++;
+  }
+  return out.filter(x=>x.text.length);
 }
 async function openBook(b){
   if(b.view==null) b.view='pdf';
@@ -865,6 +880,7 @@ async function buildWordLayer(holder,textContent,vp,W,H){
       const w=Math.max(1, ws[i]*k);
       const sp=document.createElement('span');
       sp.className='ow';
+      sp.dataset.oi=out.length;
       sp.textContent=tk;
       sp.style.cssText='left:'+x+'px;top:'+yTop+'px;width:'+w+'px;height:'+fh+'px;font-size:'+fh+'px;line-height:'+fh+'px;';
       x+=w;
@@ -876,10 +892,11 @@ async function buildWordLayer(holder,textContent,vp,W,H){
 function buildOcrOverlay(holder,words,W,H){
   const tld=el('<div class="textLayer" style="position:absolute;left:0;top:0;width:'+W+'px;height:'+H+'px"></div>');
   holder.appendChild(tld);
-  words.forEach(w=>{
+  words.forEach((w,i)=>{
     if(!w||!(w.x>=0)||!w.t) return;
     const sp=document.createElement('span');
     sp.className='ow';
+    sp.dataset.oi=i;
     sp.textContent=w.t;
     const fs=Math.max(8,(w.h*H));
     sp.style.cssText='left:'+(w.x*W)+'px;top:'+(w.y*H)+'px;font-size:'+fs+'px;line-height:'+fs+'px;';
@@ -918,7 +935,7 @@ async function renderPagePlain(){
   const paras=splitParas(raw);
   const mats=(await dbAll('materials')).filter(m=>m.bookId===CURRENT.book.id&&m.page===CURRENT.page);
   body.innerHTML=`<div class="page-head">第 ${CURRENT.page} 页</div>`+
-    paras.map((pt,i)=>paraHtml(pt,i,mats)).join('')+
+    paras.map((pt,i)=>paraHtml(pt.text,i,pt.para,mats)).join('')+
     `<div class="page-nav">
       <button class="btn" ${CURRENT.page<=1?'disabled':''} onclick="gotoPage(${CURRENT.page-1})">← 上一页</button>
       <button class="btn" ${CURRENT.page>=numPages?'disabled':''} onclick="gotoPage(${CURRENT.page+1})">下一页 →</button>
@@ -948,9 +965,22 @@ window.ocrBook=async function(){
   const b=document.getElementById('ocrBookProg'); if(b) b.remove();
   toast('整本识别完成'); await renderPage();
 };
-function paraHtml(raw,i,mats){
-  let out=esc(raw);
-  let html='<p class="para" data-idx="'+i+'">'+out+'</p>';
+function wrapUnits(text){
+  // 中文逐字、英文按词包成 <span class="u">，实现手机端“点字即选”“贴字吸附”的精准选取
+  let html='';
+  const re=/([\u4e00-\u9fff\uff00-\uffef]+)|([A-Za-z0-9]+(?:['’\-.][A-Za-z0-9]+)*)|(\s+)|([^\s\u4e00-\u9fffA-Za-z0-9]+)/g;
+  let m; while((m=re.exec(text))){
+    const g=m[0];
+    if(/^[\u4e00-\u9fff\uff00-\uffef]+$/.test(g)){ for(const ch of g) html+='<span class="u">'+ch+'</span>'; }
+    else if(/^[A-Za-z0-9]/.test(g)){ html+='<span class="u">'+g+'</span>'; }
+    else if(/^\s+$/.test(g)){ html+='<span class="u">'+g+'</span>'; }
+    else { html+='<span class="u">'+esc(g)+'</span>'; }
+  }
+  return html;
+}
+function paraHtml(raw,i,para,mats){
+  let out=wrapUnits(esc(raw));
+  let html='<p class="para" data-idx="'+i+'" data-para="'+para+'">'+out+'</p>';
   mats.filter(m=>m.kind==='note'&&m.para===i).forEach(m=>{
     html+='<div class="note-inline"><b>我的批注</b>　'+esc(m.note)+
       '<div style="font-size:12px;color:var(--muted);margin-top:3px">'+esc(m.bookTitle)+' · 第'+m.page+'页 · <button class="btn sm" data-delmat="'+m.id+'" style="color:var(--danger);padding:0;background:none;border:none;font-size:12px">删除批注</button></div></div>';
@@ -971,6 +1001,7 @@ function selectedSpanIdxs(){
   return out;
 }
 function maybeShowBar(){
+  if(TV){ return; } // 触屏选取由 showQBar 接管
   const sel=window.getSelection();
   if(!sel||sel.isCollapsed||!sel.rangeCount){ hideSelBar(); return; }
   const aBox=boxOf(sel.anchorNode), fBox=boxOf(sel.focusNode);
@@ -995,14 +1026,37 @@ document.addEventListener('pointerdown',e=>{
 document.addEventListener('click',()=>{ if(_bubbleDown){ _bubbleDown=false; } });
 $('selBar').addEventListener('pointerdown',e=>e.stopPropagation());
 $('selBar').addEventListener('mousedown',e=>e.preventDefault());
+function currentRange(){
+  if(TV){
+    const q=UNITS.slice(TV.a,TV.b+1).map(u=>u.txt).join('').replace(/\s+/g,' ').trim();
+    const firstEl=UNITS[TV.a]&&UNITS[TV.a].el;
+    let para=null, spans=[];
+    if(firstEl){
+      const pEl=firstEl.closest('.para');
+      if(pEl) para=+pEl.dataset.idx;
+      else if(firstEl.classList.contains('ow')) spans=tvSpanIdx();
+    }
+    return {quote:q,para,spans,page:CURRENT.page};
+  }
+  return SEL||null;
+}
+function tvSpanIdx(){
+  const out=[];
+  // PDF 原文视图下 UNITS 即 .textLayer .ow span，记录各自在 spans 数组中的原下标 data-oi
+  for(let i=TV.a;i<=TV.b;i++){ const u=UNITS[i]; if(u&&u.el.dataset.oi!=null) out.push(+u.el.dataset.oi); }
+  return out;
+}
 $('selBar').addEventListener('click',async e=>{
-  const tb=e.target.closest('button'); if(!tb||!SEL)return;
+  const tb=e.target.closest('button'); if(!tb)return;
   const a=tb.dataset.a;
-  if(a==='note'){ openNoteModal(SEL.quote); }
-  else if(a==='fav'){ await addMaterial({kind:'material',note:'',quote:SEL.quote,spans:SEL.spans,para:SEL.para}); renderPage(); toast('已收藏为素材'); }
-  else if(a==='tr'){ openTranslateModal(SEL.quote); }
-  else if(a==='ask'){ openAskModal(SEL.quote); }
+  const R=currentRange(); if(!R){ hideSelBar(); return; }
+  if(a==='sent'||a==='para'){ expandTo(a==='sent'?'句':'段'); return; }
+  if(a==='note'){ openNoteModal(R.quote); }
+  else if(a==='fav'){ await addMaterial({kind:'material',note:'',quote:R.quote,spans:R.spans,para:R.para}); renderPage(); toast('已收藏为素材'); }
+  else if(a==='tr'){ openTranslateModal(R.quote); }
+  else if(a==='ask'){ openAskModal(R.quote); }
   else if(a==='x'){ hideSelBar(); }
+  closeTV();
   hideSelBar();
 });
 async function addMaterial(o){
@@ -1040,12 +1094,163 @@ $('readingBody').addEventListener('click',async e=>{
   const b=e.target.closest('[data-delmat]'); if(!b)return;
   if(confirm('删除该批注？')){ await dbDel('materials',b.dataset.delmat); await renderPage(); }
 });
-// 点击单个 OCR 词 → 精确选中该词
-function selWord(span){
-  try{ const r=document.createRange(); r.selectNodeContents(span); const s=window.getSelection(); s.removeAllRanges(); s.addRange(r); }catch(e){}
-  maybeShowBar();
+/* ========== 微信读书式触屏选取引擎：点选词/字 → 拖动两端手柄微调 → 句/段一键扩选 + 放大镜 ========== */
+let TV=null, UNITS=[], _uniToEl=new WeakMap(), _dragH=null;
+function cachePageUnits(){
+  const els=_rBody.querySelectorAll('.textLayer .ow, .para .u');
+  UNITS=[]; 
+  for(let i=0;i<els.length;i++){ UNITS.push({el:els[i],txt:els[i].textContent}); _uniToEl.set(els[i],i); }
+  _uniToEl=new Map(); [].forEach.call(els,(el,i)=>_uniToEl.set(el,i));
 }
-$('readingBody').addEventListener('click',e=>{ const w=e.target.closest('span.ow'); if(w){ e.preventDefault(); selWord(w); } });
+function uIdxOf(el){ return _uniToEl.get(el); }
+function uRect(i){ const u=UNITS[i]; const el=u&&u.el; if(!el) return null; const r=el.getBoundingClientRect(); return r; }
+function uAtPoint(x,y){
+  const el=document.elementFromPoint(x,y);
+  let n=el;
+  while(n&&n!==document){ if(n.classList&&(n.classList.contains('u')||n.classList.contains('ow'))&&n.closest&&n.closest('#readingBody')) return n; n=n.parentNode; }
+  return null;
+}
+function showQBar(){
+  const R=currentRange(); if(!R||!R.quote){ hideSelBar(); return; }
+  const bar=$('selBar'); bar.style.display='flex';
+  const firstEl=UNITS[TV.a]&&UNITS[TV.a].el;
+  const hasPara=!!(firstEl&&firstEl.closest('.para'));
+  bar.innerHTML='<span class="sq">'+esc(R.quote.slice(0,60))+'…</span>'+
+    (hasPara?'<button data-a="sent">整句</button><button data-a="para">整段</button>':'')+
+    '<button data-a="note">批注</button><button data-a="fav">收藏</button><button data-a="tr">翻译</button><button data-a="ask">问AI</button><button class="x" data-a="x">×</button>';
+}
+function applyTouch(a,b){
+  const n=UNITS.length; if(!n) return;
+  a=Math.max(0,Math.min(n-1,a)); b=Math.max(0,Math.min(n-1,b));
+  if(a>b){ const t=a;a=b;b=t; }
+  TV={a,b};
+  // 应用原生选区（同时兼容桌面）
+  try{
+    const Ua=UNITS[a].el, Ub=UNITS[b].el;
+    const sel=window.getSelection(); sel.removeAllRanges();
+    const r=document.createRange();
+    if(Ua===Ub){ r.setStart(Ua,0); r.setEnd(Ub,1); }
+    else{ r.setStart(Ua,0); r.setEnd(Ub, Ub.childNodes.length||1); }
+    sel.addRange(r);
+  }catch(e){}
+  // 高亮闪选
+  for(let i=0;i<n;i++) UNITS[i].el.classList.remove('sel');
+  for(let i=a;i<=b && i<UNITS.length;i++) UNITS[i].el.classList.add('sel');
+  placeHandles(); showQBar();
+}
+function placeHandles(){
+  const h0=document.getElementById('selH0'), h1=document.getElementById('selH1');
+  if(!TV||!UNITS.length){ if(h0)h0.style.visibility='hidden'; if(h1)h1.style.visibility='hidden'; return; }
+  const r0=uRect(TV.a), r1=uRect(TV.b);
+  if(!r0||!r1){ hideHandles(); return; }
+  const vw=innerWidth, vh=innerHeight;
+  h0.style.left=Math.max(0,Math.min(vw,r0.left))+'px'; h0.style.top=Math.max(0,r0.top-3)+'px';
+  h1.style.left=Math.max(0,Math.min(vw,r1.right))+'px'; h1.style.top=Math.min(vh,r1.bottom+3)+'px';
+  h0.style.visibility='visible'; h1.style.visibility='visible';
+}
+function hideHandles(){ const a=document.getElementById('selH0'),b=document.getElementById('selH1'); if(a)a.style.visibility='hidden'; if(b)b.style.visibility='hidden'; }
+function closeTV(){
+  TV=null; hideHandles(); hideSelBar();
+  for(let i=0;i<UNITS.length;i++){ const st=UNITS[i].el.className; if(st.indexOf('sel')>=0) UNITS[i].el.classList.remove('sel'); }
+  UNITS=[];
+}
+function showMag(i,isStart){
+  const mag=document.getElementById('selMag'); if(!mag)return;
+  const R=currentRange(); const selTxt=R?R.quote:'';
+  const s=Math.max(0,i-5), e=Math.min(UNITS.length-1,i+5);
+  let t=''; for(let k=s;k<=e;k++) t+=UNITS[k].txt;
+  mag.textContent=t;
+  t=''; 
+  const r=uRect(i); if(!r){ mag.style.display='none'; return; }
+  mag.style.display='block';
+  let mx=r.left, my=r.top - (mag.offsetHeight+18);
+  if(my<0){ my=r.bottom+18; }
+  mx=Math.max(4,Math.min(innerWidth-mag.offsetWidth-4,mx));
+  mag.style.left=mx+'px'; mag.style.top=my+'px';
+}
+function hideMag(){ const m=document.getElementById('selMag'); if(m)m.style.display='none'; }
+function _unitFromAny(i){ return UNITS[i]?UNITS[i].el:null; }
+function handleDown(e,h){
+  e.preventDefault(); _dragH=h;
+  try{ document.body.setPointerCapture(h.id===e.target.id?e.pointerId:e.pointerId); }catch(err){}
+}
+function handleMove(e){
+  if(!_dragH) return;
+  const x=e.clientX, y=e.clientY;
+  const elTarget=uAtPoint(x,y);
+  let idx=-1;
+  if(elTarget){ idx=uIdxOf(elTarget); }
+  if(idx<0 && UNITS.length){ // 落在空白处 → 取最近单元
+    let best=-1,bd=1e9;
+    for(let i=0;i<UNITS.length;i++){ const r=uRect(i); if(!r) continue; const cx=r.left+r.width/2, cy=r.top+r.height/2; const d=(cx-x)*(cx-x)+(cy-y)*(cy-y); if(d<bd){bd=d;best=i;} }
+    idx=best;
+  }
+  if(idx<0 || !TV) return;
+  if(_dragH===document.getElementById('selH0')){ if(idx<=TV.b){ TV.a=idx; } }
+  else { if(idx>=TV.a){ TV.b=idx; } }
+  applyTouch(TV.a,TV.b); hideMag(); 
+  if(_dragH) showMag(_dragH===document.getElementById('selH0')?TV.a:TV.b);
+}
+function releaseHandle(){ _dragH=null; hideMag(); }
+(function initTouchSel(){
+  const h0=document.getElementById('selH0'), h1=document.getElementById('selH1');
+  h0.addEventListener('pointerdown',e=>handleDown(e,h0));
+  h1.addEventListener('pointerdown',e=>handleDown(e,h1));
+  document.addEventListener('pointermove',handleMove);
+  document.addEventListener('pointerup',releaseHandle);
+  document.addEventListener('pointercancel',releaseHandle);
+  document.addEventListener('pointerdown',e=>{
+    if(_dragH) return;
+    if(e.target.closest('#selBar')||e.target.closest('#selH0')||e.target.closest('#selH1')) return;
+    const isTouch = e.pointerType==='touch';
+    window.__isTouch=isTouch;
+    if(TV && !e.target.closest('#readingBody')){ closeTV(); return; }
+    if(!isTouch) return; // 鼠标保留原生拖选
+    const u=uAtPoint(e.clientX,e.clientY);
+    if(u){ e.preventDefault(); cachePageUnits(); const i=uIdxOf(u); if(i>=0) applyTouch(i,i); }
+    else if(TV){ closeTV(); }
+  },true);
+})();
+/* 句/段一键扩选（仅排版阅读） */
+function expandTo(mode){
+  if(!TV||!UNITS.length) return;
+  if(mode==='段'){
+    // 逻辑段落可能被切成多个显示块，这里按 data-para 整组扩选
+    const pEl0=UNITS[TV.a].el.closest('.para');
+    if(!pEl0) return;
+    const target=pEl0.dataset.para;
+    const group=[].slice.call(_rBody.querySelectorAll('.para')).filter(p=>p.dataset.para===target);
+    if(!group.length) return;
+    const firstU=group[0].querySelector('.u');
+    const lastU=[].slice.call(group[group.length-1].querySelectorAll('.u')).pop();
+    const ia=uIdxOf(firstU), ib=uIdxOf(lastU);
+    if(ia>=0&&ib>=0) applyTouch(ia,ib);
+    return;
+  }
+  // 句：在选中的显示块内扩到整句边界
+  const ps=new Set();
+  [UNITS[TV.a].el,UNITS[TV.b].el].forEach(el=>{ const p=el.closest('.para'); if(p) ps.add(p); });
+  if(!ps.size){ return; }
+  let na=Infinity, nb=-1;
+  ps.forEach(p=>{
+    const us=[].slice.call(p.querySelectorAll('.u'));
+    if(!us.length) return;
+    const text=us.map(u=>u.textContent).join('');
+    const ca=charOff(us,UNITS[TV.a].el), cb=charOff(us,UNITS[TV.b].el);
+    if(ca<0||cb<0) return;
+    let sa=sentenceStart(text,ca), sb=sentenceEnd(text,cb);
+    const aU=charToUnit(us,sa), bU=charToUnit(us,sb);
+    const ia=uIdxOf(aU), ib=uIdxOf(bU);
+    if(ia>=0&&ia<na)na=ia; if(ib>=nb)nb=ib;
+  });
+  if(na!==Infinity && nb>=na){ applyTouch(na,nb); }
+}
+function charOff(us,el){ let off=0; for(const u of us){ if(u===el) return off; off+=u.textContent.length; } return -1; }
+function charToUnit(us,ci){ let cum=0,last=us[0]; for(const u of us){ if(ci<cum+u.textContent.length) return u; cum+=u.textContent.length; last=u; } return last; }
+function sentenceStart(t,i){ for(let k=i-1;k>=0;k--){ if(/[。！？；…：·、\n]/.test(t[k])) return k+1; } return 0; }
+function sentenceEnd(t,i){ for(let k=i;k<t.length;k++){ if(/[。！？…：\n]/.test(t[k])) return Math.min(k+1,t.length); } return t.length; }
+/* 点击批注删除 / 点击单元选取共用入口 */
+$('readingBody').addEventListener('click',e=>{ const u=e.target.closest('.para .u, .ow'); if(u && window.__isTouch){ e.preventDefault(); cachePageUnits(); const i=uIdxOf(u); if(i>=0) applyTouch(i,i); } });
 /* ---------- AI 语义检索（跨书找句 + 定位） ---------- */
 const STOP=new Set(('的 了 和 与 在 是 我 你 他 她 它 这 那 中 于 之 有 也 就 都 而 及 为 被 把 但 此外 如果 不 要 给 等 或 并且 a an the is are was were be to of and for in on at by with from as it its this that we they he she not or but if can will would could should may might have has had do does did what how why which where when one two about').split(' '));
 function tokenize(str){
