@@ -168,6 +168,7 @@ textarea.txt-in{border:1px solid var(--line);border-radius:8px;padding:8px 12px;
         <span id="pgLabel">– / –</span>
         <button class="btn sm" id="pgNext">下一页</button>
       </div>
+      <button class="btn sm ghost" id="btnAiFind">✨ AI 检索</button>
       <button class="btn sm ghost" id="readerJumpMats">☰ 查看本书素材</button>
     </div>
     <div id="reading-card">
@@ -348,6 +349,7 @@ async function ocrPage(book,pageIdx){ // pageIdx 1-based
   store.pages[pageIdx-1]=text;
   store.words=store.words||[]; store.words[pageIdx-1]=words;
   await dbPut('pages',store);
+  await dbDel('corpus',book.id);
   return text;
 }
 
@@ -559,6 +561,7 @@ async function renderPagePdf(){
     });
   }
   body.appendChild(holder);
+  if(spans.length){ const hint=el('<div style="max-width:760px;margin:0 auto 8px;font-size:12.5px;color:var(--muted)">💡 点击任意一个词可精确选中它；长按拖动可多选</div>'); body.insertBefore(hint,holder); }
   // 本页批注列在页图下方
   const notes=(await dbAll('materials')).filter(m=>m.bookId===b.id&&m.page===CURRENT.page&&m.kind==='note');
   if(notes.length){
@@ -582,8 +585,9 @@ function buildOcrOverlay(holder,words,W,H){
   words.forEach(w=>{
     if(!w||!(w.x>=0)||!w.t) return;
     const sp=document.createElement('span');
+    sp.className='ow';
     sp.textContent=w.t;
-    const fs=w.h*H;
+    const fs=Math.max(8,(w.h*H));
     sp.style.cssText='left:'+(w.x*W)+'px;top:'+(w.y*H)+'px;font-size:'+fs+'px;line-height:'+fs+'px;';
     tld.appendChild(sp);
   });
@@ -740,6 +744,119 @@ function openNoteModal(quote){
 $('readingBody').addEventListener('click',async e=>{
   const b=e.target.closest('[data-delmat]'); if(!b)return;
   if(confirm('删除该批注？')){ await dbDel('materials',b.dataset.delmat); await renderPage(); }
+});
+// 点击单个 OCR 词 → 精确选中该词
+function selWord(span){
+  try{ const r=document.createRange(); r.selectNodeContents(span); const s=window.getSelection(); s.removeAllRanges(); s.addRange(r); }catch(e){}
+  maybeShowBar();
+}
+$('readingBody').addEventListener('click',e=>{ const w=e.target.closest('span.ow'); if(w){ e.preventDefault(); selWord(w); } });
+/* ---------- AI 语义检索（跨书找句 + 定位） ---------- */
+const STOP=new Set(('的 了 和 与 在 是 我 你 他 她 它 这 那 中 于 之 有 也 就 都 而 及 为 被 把 但 此外 如果 不 要 给 等 或 并且 a an the is are was were be to of and for in on at by with from as it its this that we they he she not or but if can will would could should may might have has had do does did what how why which where when one two about').split(' '));
+function tokenize(str){
+  const s=String(str||'').toLowerCase();
+  const spaced=s.replace(/[\u4e00-\u9fff]/g,c=>' '+c+' ');
+  return spaced.split(/[^a-z0-9\u4e00-\u9fff]+/).filter(t=>t&&!STOP.has(t));
+}
+function escRe(s){ return s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'); }
+async function getCorpusPages(bookId){
+  const st=await dbGet('corpus',bookId);
+  if(st&&Array.isArray(st.pages)) return st.pages;
+  const p=await dbGet('pages',bookId);
+  const arr=(p&&p.pages)||[];
+  await dbPut('corpus',{id:bookId,pages:arr});
+  return arr;
+}
+async function localFind(q){
+  const terms=tokenize(q); if(!terms.length) terms=[q.toLowerCase()].filter(Boolean);
+  const books=await dbAll('books');
+  const scored=[];
+  for(const b of books){
+    const pages=await getCorpusPages(b.id); if(!pages) continue;
+    for(let i=0;i<pages.length;i++){
+      const text=pages[i]||''; if(!text) continue;
+      const low=text.toLowerCase(); let score=0;
+      terms.forEach(t=>{ const re=new RegExp(escRe(t),'g'); const mm=low.match(re); if(mm) score+=((t.length>4?3:2)*mm.length); });
+      if(score>0) scored.push({bookId:b.id,title:b.title||'未命名',page:i+1,text,score});
+    }
+  }
+  scored.sort((x,y)=>y.score-x.score);
+  return scored.slice(0,60);
+}
+function snippet(text,terms){
+  const low=text.toLowerCase(); let idx=-1;
+  terms.forEach(t=>{ const i=low.indexOf(t.toLowerCase()); if(i>=0&&(idx<0||i<idx)) idx=i; });
+  if(idx<0) idx=0;
+  const s=Math.max(0,idx-50), e=Math.min(text.length,idx+150);
+  return (s>0?'…':'')+text.slice(s,e)+(e<text.length?'…':'');
+}
+function hlText(raw){
+  let s=esc(raw);
+  const el=document.getElementById('af-q'); const terms=tokenize(el?el.value:'');
+  terms.slice(0,12).forEach(t=>{ const re=new RegExp(escRe(t),'gi'); s=s.replace(re,m=>'<mark>'+m+'</mark>'); });
+  return s;
+}
+function renderLocalHits(hits){
+  if(!hits.length) return '<div style="color:var(--muted)">未找到相关内容。</div>';
+  return hits.slice(0,15).map(h=>{
+    const terms=tokenize(document.getElementById('af-q')?document.getElementById('af-q').value:'');
+    const sn=snippet(h.text,terms.length?terms:[h.text.slice(0,6)]);
+    return `<div style="border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px;background:var(--surface)">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px">
+        <b style="font-size:13px;color:var(--brand)">${esc(h.title)} · 第 ${h.page} 页</b>
+        <span style="color:var(--muted);font-size:11px">相关度 ${h.score}</span></div>
+      <div class="mono" style="font-size:13px;white-space:pre-wrap;word-break:break-word">${hlText(sn)}</div>
+      <button class="btn sm" data-find="${h.bookId}|${h.page}" style="margin-top:8px">打开第 ${h.page} 页</button></div>`;
+  }).join('');
+}
+function renderAiRerank(aitext,hits){
+  const lines=aitext.split(/\n+/).map(l=>l.trim()).filter(Boolean).map(l=>'<div style="margin-bottom:10px;line-height:1.85">'+esc(l)+'</div>').join('');
+  const list=renderLocalHits(hits.slice(0,8));
+  return `<div style="border:1px solid var(--brand);background:var(--brand-soft);border-radius:10px;padding:12px 14px;margin-bottom:14px">${lines}</div>
+    <div style="font-size:13px;color:var(--muted);margin:2px 0 8px">▸ 候选原文定位（点击可打开原书该页）</div>${list}`;
+}
+function openAiFind(){
+  modal(`<div class="modal-head">AI 检索 · 语义找句<button class="modal-x" onclick="closeModal()">×</button></div>
+  <div class="modal-body">
+    <div class="field"><label>用一句话描述你想找的内容</label><textarea id="af-q" class="txt-in" rows="2" placeholder="例如：书中关于“友谊需要相互关心”的论述"></textarea></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">
+      <button class="btn primary" id="af-go">🔎 AI 智能检索</button>
+      <button class="btn" id="af-lite">关键词检索（离线）</button>
+    </div>
+    <div id="af-status" style="font-size:12.5px;color:var(--muted);margin:6px 0"></div>
+    <div id="af-out" style="font-size:14px;color:var(--ink2);line-height:1.7"></div>
+  </div>`);
+  $('af-go').addEventListener('click',()=>aiFind(true));
+  $('af-lite').addEventListener('click',()=>aiFind(false));
+}
+async function aiFind(useAI){
+  const q=$('af-q').value.trim(); if(!q){ toast('请先输入要搜索的内容'); return; }
+  const st=$('af-status'), out=$('af-out');
+  st.textContent='正在检索你上传的所有书…';
+  try{
+    const hits=await localFind(q);
+    if(!hits.length){ st.textContent='⚠️ 在所有已上传的书中未匹配到相关内容。'; return; }
+    const core=useAI&&SETTINGS.base&&SETTINGS.model;
+    if(core){
+      st.textContent='正在用 AI 精准定位最贴合的句子…';
+      const prompt='用户想从自己上传的书里找到这样一句话：'+q+'。\n以下是按关键词初步筛选出的候选片段（每条含书名、页码与原文）。请从中选出最贴合用户意图的句子，逐字引用其原文（不要改写、不要编造），并逐条标注出自哪本书、第几页，最多 3 条。若候选都不贴切，就回复“未找到贴切内容”。\n\n候选：\n'+hits.slice(0,30).map(h=>'['+h.title+' 第'+h.page+'页] '+h.text.slice(0,380)).join('\n---\n');
+      const r=await llmChat([{role:'user',content:prompt}],true);
+      if(r.ok){ st.textContent=''; out.innerHTML=renderAiRerank(r.text,hits); return; }
+      st.textContent='AI 调用失败：'+r.err+'（已改用关键词结果）';
+    } else if(useAI){ st.textContent='未配置 AI，已显示关键词检索结果'; }
+    else st.textContent='';
+    out.innerHTML=renderLocalHits(hits);
+  }catch(e){ st.textContent='检索出错：'+String((e&&e.message)||e); }
+}
+$('btnAiFind').addEventListener('click',openAiFind);
+document.addEventListener('click',async e=>{
+  const f=e.target.closest('[data-find]'); if(!f) return;
+  const [bid,pg]=String(f.dataset.find).split('|');
+  closeModal();
+  try{
+    const b=(await dbAll('books')).find(x=>x.id===bid);
+    if(b){ CURRENT.book=b; await openBook(b); await gotoPage(Number(pg)); }
+  }catch(err){ console.warn(err); }
 });
 /* ---------- 翻译 ---------- */
 function openTranslateModal(quote){
