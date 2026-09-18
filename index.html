@@ -323,7 +323,8 @@ async function parseBook(file){
     const tc=await pg.getTextContent();
     pages.push(repairText(tc.items.map(it=>it.str).join(' ')));
   }
-  const hasText=pages.some(p=>p.length>40);
+  const withText=pages.filter(p=>p.length>60).length;
+  const hasText=numPages===0?false:(withText/numPages>=0.4);
   return {numPages,pages,hasText};
 }
 async function ocrPage(book,pageIdx){ // pageIdx 1-based
@@ -340,7 +341,10 @@ async function ocrPage(book,pageIdx){ // pageIdx 1-based
   const lang=SETTINGS.ocrLang||'eng';
   const res=await Tesseract.recognize(canvas,lang,{logger:m=>{ if(m.status==='recognizing text'){ const i=$('ocrInfo'); if(i) i.textContent='OCR 识别第 '+pageIdx+' 页… '+(m.progress*100|0)+'%'; } }});
   const text=repairText((res.data.text||'').replace(/\s+/g,' ').replace(/[ \t]{2,}/g,' ').trim());
+  const cw=canvas.width||1, ch=canvas.height||1;
+  const words=(res.data.words||[]).map(w=>({t:String(w.text||'').trim(),x:((w.bbox&&w.bbox.x0)||0)/cw,y:((w.bbox&&w.bbox.y0)||0)/ch,w:(((w.bbox&&w.bbox.x1)||0)-((w.bbox&&w.bbox.x0)||0))/cw,h:(((w.bbox&&w.bbox.y1)||0)-((w.bbox&&w.bbox.y0)||0))/ch})).filter(v=>v.t);
   store.pages[pageIdx-1]=text;
+  store.words=store.words||[]; store.words[pageIdx-1]=words;
   await dbPut('pages',store);
   return text;
 }
@@ -442,7 +446,7 @@ function splitParas(text){
   return out.filter(x=>x.length);
 }
 async function openBook(b){
-  if(b.view==null) b.view=(b.kind==='text'?'pdf':'plain');
+  if(b.view==null) b.view='pdf';
   CURRENT.book=b; CURRENT.page=1;
   $$('.nav button').forEach(x=>x.classList.remove('active'));
   const navBtn=$$('.nav button').find(x=>x.dataset.view==='reader');
@@ -470,8 +474,8 @@ async function gotoPage(p){
 }
 function updateModeSwitch(){
   const sw=$('modeSwitch');
-  if(CURRENT.book && CURRENT.book.kind==='text'){ sw.style.display='flex'; }
-  else { sw.style.display='none'; return; }
+  if(!CURRENT.book){ sw.style.display='none'; return; }
+  sw.style.display='flex';
   const view=CURRENT.book.view==='plain'?'plain':'pdf';
   $('modePdf').classList.toggle('on',view==='pdf');
   $('modePlain').classList.toggle('on',view==='plain');
@@ -504,13 +508,20 @@ function mapQuoteToSpans(spans,quote){
   }
   return out;
 }
+function pdfPromptOverlay(holder,msg,hasWords){
+  holder.insertAdjacentHTML('beforeend',`<div style="position:absolute;left:0;right:0;bottom:18px;display:flex;flex-direction:column;align-items:center;gap:8px">
+    <div style="background:rgba(255,255,255,.95);border:1px solid var(--line);border-radius:10px;padding:10px 14px;font-size:13px;color:var(--ink);box-shadow:var(--shadow)">${msg}</div>
+    <div style="display:flex;gap:8px">${hasWords?'':'<button class="btn primary sm" onclick="pdfOcrHere()">识别本页后即可选取</button><button class="btn sm" onclick="ocrBook()">识别整本</button>'}</div>
+  </div>`);
+}
 async function renderPagePdf(){
   const b=CURRENT.book; const body=$('readingBody');
+  const store=await dbGet('pages',b.id);
   const pdf=await getPdfDoc(b);
   const page=await pdf.getPage(CURRENT.page);
   const baseVp=page.getViewport({scale:1});
   const maxW=Math.min(($('reading-card').clientWidth||820)-24,760);
-  const scale=Math.max(0.4,Math.min(maxW/baseVp.width,1.7));
+  const scale=Math.max(0.4,Math.min(maxW/baseVp.width,1.8));
   const vp=page.getViewport({scale});
   body.innerHTML='';
   const pageHead=el('<div class="page-head"><span>第 '+CURRENT.page+' 页 · PDF 原文</span><span>'+(b.title||'')+'</span></div>');
@@ -520,23 +531,31 @@ async function renderPagePdf(){
   canvas.style.cssText='display:block;width:'+vp.width+'px;height:'+vp.height+'px';
   holder.appendChild(canvas);
   await page.render({canvasContext:canvas.getContext('2d'),viewport:vp}).promise;
-  const tld=el('<div class="textLayer" style="position:absolute;left:0;top:0;width:'+vp.width+'px;height:'+vp.height+'px"></div>');
-  holder.appendChild(tld);
-  const textContent=await page.getTextContent();
-  if(textContent && textContent.items && textContent.items.length){
-    const textDivs=[];
-    const rr=pdfjsLib.renderTextLayer({textContent,viewport:vp,container:tld,textDivs});
-    if(rr&&rr.promise){ try{ await rr.promise; }catch(e){ console.warn('textLayer',e); } }
-  }
-  const spans=Array.prototype.slice.call(tld.querySelectorAll('span'));
+  let spans=[];
+  let ocrPrompt=false;
+  try{
+    const words=(store.words&&store.words[CURRENT.page-1])||[];
+    if(words && words.length){
+      spans=buildOcrOverlay(holder,words,vp.width,vp.height);
+    } else if(b.kind!=='scan'){
+      const textContent=await page.getTextContent();
+      const items=textContent&&textContent.items?textContent.items:[];
+      const total=items.reduce((s,it)=>s+String(it.str||'').length,0);
+      if(items.length>0 && total>20){ spans=await buildTextLayer(holder,textContent,vp); }
+      else { ocrPrompt='本页疑似为图片/扫描，可先用 OCR 提取文字'; pdfPromptOverlay(holder,ocrPrompt,false); }
+    } else {
+      ocrPrompt='本页为扫描图像，识别后即可在原件上选取文字'; pdfPromptOverlay(holder,ocrPrompt,false);
+    }
+  }catch(e){ console.warn('overlay',e); pdfPromptOverlay(holder,'文字层加载失败，仍可浏览页面原图',false); }
   spans.forEach((s,i)=>{ s.dataset.idx=i; });
-  // 回显已有高亮
-  const hl=(await dbAll('materials')).filter(m=>m.bookId===b.id&&m.page===CURRENT.page&&m.kind==='highlight');
-  hl.forEach(m=>{
-    let target=(m.spans&&m.spans.length)?m.spans:mapQuoteToSpans(spans,m.quote);
-    const cls='hl'+(m.color==='g'?' g':m.color==='b'?' b':'');
-    target.forEach(i=>{ const sp=spans[i]; if(sp) sp.classList.add(cls); });
-  });
+  if(spans.length){
+    const hl=(await dbAll('materials')).filter(m=>m.bookId===b.id&&m.page===CURRENT.page&&m.kind==='highlight');
+    hl.forEach(m=>{
+      let target=(m.spans&&m.spans.length)?m.spans:mapQuoteToSpans(spans,m.quote);
+      const cls='hl'+(m.color==='g'?' g':m.color==='b'?' b':'');
+      target.forEach(i=>{ const sp=spans[i]; if(sp) sp.classList.add(cls); });
+    });
+  }
   body.appendChild(holder);
   // 本页批注列在页图下方
   const notes=(await dbAll('materials')).filter(m=>m.bookId===b.id&&m.page===CURRENT.page&&m.kind==='note');
@@ -545,11 +564,34 @@ async function renderPagePdf(){
   }
   const numPages=b.numPages||pdf.numPages||1;
   body.insertAdjacentHTML('beforeend',`<div class="page-nav" style="max-width:760px;margin:14px auto 0"><button class="btn" ${CURRENT.page<=1?'disabled':''} onclick="gotoPage(${CURRENT.page-1})">← 上一页</button><button class="btn" ${CURRENT.page>=numPages?'disabled':''} onclick="gotoPage(${CURRENT.page+1})">下一页 →</button></div>`);
+  void ocrPrompt;
 }
-/* ===== 阅读分发：PDF 原文 vs 排版 ===== */
+async function buildTextLayer(holder,textContent,vp){
+  const tld=el('<div class="textLayer" style="position:absolute;left:0;top:0;width:'+vp.width+'px;height:'+vp.height+'px"></div>');
+  holder.appendChild(tld);
+  const textDivs=[];
+  const rr=pdfjsLib.renderTextLayer({textContent,viewport:vp,container:tld,textDivs});
+  try{ if(rr&&rr.promise) await rr.promise; }catch(e){ console.warn('textLayer',e); }
+  return Array.prototype.slice.call(tld.querySelectorAll('span'));
+}
+function buildOcrOverlay(holder,words,W,H){
+  const tld=el('<div class="textLayer" style="position:absolute;left:0;top:0;width:'+W+'px;height:'+H+'px"></div>');
+  holder.appendChild(tld);
+  words.forEach(w=>{
+    if(!w||!(w.x>=0)||!w.t) return;
+    const sp=document.createElement('span');
+    sp.textContent=w.t;
+    const fs=w.h*H;
+    sp.style.cssText='left:'+(w.x*W)+'px;top:'+(w.y*H)+'px;font-size:'+fs+'px;line-height:'+fs+'px;';
+    tld.appendChild(sp);
+  });
+  return Array.prototype.slice.call(tld.querySelectorAll('span'));
+}
+window.pdfOcrHere=async function(){ await runOCR(); };
+/* ===== 阅读分发：默认 PDF 原文（画布+可选层），扫描书可切换到排版 ===== */
 async function renderPage(){
   if(!CURRENT.book) return;
-  if(CURRENT.book.kind==='text' && CURRENT.book.view!=='plain'){ await renderPagePdf(); return; }
+  if(CURRENT.book.view!=='plain'){ await renderPagePdf(); return; }
   await renderPagePlain();
 }
 async function renderPagePlain(){
