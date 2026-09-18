@@ -93,9 +93,11 @@ main{padding:18px}
 .mode-switch button.on{background:var(--surface);color:var(--brand);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.08)}
 .reader-tools{display:flex;gap:6px;flex-wrap:wrap;margin-top:14px}
 .reader-tools.on{border-top:1px solid var(--line);padding-top:12px}
-#selBar{position:fixed;z-index:60;display:none;gap:4px;flex-wrap:wrap;background:var(--ink);padding:8px;border-radius:12px;box-shadow:0 6px 20px rgba(0,0,0,.28);max-width:94vw}
-#selBar button{background:transparent;border:none;color:#fff;font-size:14px;padding:9px 13px;border-radius:8px;white-space:nowrap}
-#selBar button:hover,#selBar button:active{background:rgba(255,255,255,.2)}
+#selBar{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(12px + env(safe-area-inset-bottom));z-index:70;display:none;align-items:center;justify-content:center;gap:6px;flex-wrap:wrap;background:var(--ink);color:#fff;border-radius:16px;padding:9px 12px;box-shadow:0 8px 26px rgba(0,0,0,.32);max-width:95vw}
+#selBar .sq{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;color:rgba(255,255,255,.82)}
+#selBar button{background:rgba(255,255,255,.15);border:none;color:#fff;font-size:13.5px;padding:9px 12px;border-radius:9px;white-space:nowrap}
+#selBar button:hover,#selBar button:active{background:rgba(255,255,255,.3)}
+#selBar button.x{background:transparent;padding:6px 8px;color:rgba(255,255,255,.6);font-size:15px}
 .page-nav{display:flex;justify-content:space-between;gap:10px;margin-top:18px}
 .note-inline{background:var(--brand-soft);border-left:3px solid var(--brand);border-radius:6px;padding:8px 12px;margin:6px 0 12px;font-size:14px;color:var(--ink2)}
 .note-inline b{color:var(--brand-text)}
@@ -524,7 +526,7 @@ async function renderPagePdf(){
   const scale=Math.max(0.4,Math.min(maxW/baseVp.width,1.8));
   const vp=page.getViewport({scale});
   body.innerHTML='';
-  const pageHead=el('<div class="page-head"><span>第 '+CURRENT.page+' 页 · PDF 原文</span><span>'+(b.title||'')+'</span></div>');
+  const pageHead=el('<div class="page-head"><span>第 '+CURRENT.page+' 页 · PDF 原文</span><span class="page-title">'+(b.title||'')+'</span></div>');
   body.appendChild(pageHead);
   const holder=el('<div class="pdfpage" style="position:relative;width:'+vp.width+'px;margin:0 auto;border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow);background:#fff;overflow:hidden"></div>');
   const canvas=document.createElement('canvas'); canvas.width=vp.width; canvas.height=vp.height;
@@ -679,27 +681,25 @@ function maybeShowBar(){
   if(!sel||sel.isCollapsed||!sel.rangeCount){ hideSelBar(); return; }
   const aBox=boxOf(sel.anchorNode), fBox=boxOf(sel.focusNode);
   const paraEl=(aBox&&aBox.closest('.para'))||closestPara(sel.anchorNode)||(fBox&&fBox.closest('.para'));
-  const inPdf=!!((aBox&&aBox.closest('.pdfpage'))||(fBox&&fBox.closest('.pdfpage')));
+  const inPdf=!paraEl&&!!((aBox&&aBox.closest('.pdfpage'))||(fBox&&fBox.closest('.pdfpage')));
   if((!paraEl&&!inPdf)||(!_rBody.contains(paraEl||aBox)&&!inPdf)){ hideSelBar(); return; }
   const q=sel.toString().replace(/\s+/g,' ').trim();
   if(!q||q.length>700){ hideSelBar(); return; }
   if(inPdf){ SEL={quote:q,page:CURRENT.page,spans:selectedSpanIdxs()}; }
   else { SEL={quote:q,page:CURRENT.page,para:paraEl?+paraEl.dataset.idx:0}; }
   const bar=$('selBar'); bar.style.display='flex';
-  bar.innerHTML='<button data-a="hl">高亮</button><button data-a="note">批注</button><button data-a="fav">收藏</button><button data-a="tr">翻译</button><button data-a="ask">问 AI</button>';
-  const rect=sel.getRangeAt(0).getBoundingClientRect();
-  let x=(rect.left+rect.width/2)-(bar.offsetWidth/2);
-  let y=rect.top-bar.offsetHeight-10;
-  if(x<4)x=4; if(x+bar.offsetWidth>innerWidth-4)x=innerWidth-bar.offsetWidth-4;
-  if(y<4)y=rect.bottom+10;
-  bar.style.left=x+'px'; bar.style.top=y+'px';
+  bar.innerHTML='<span class="sq">'+esc(q.slice(0,64))+'…</span><button data-a="hl">高亮</button><button data-a="note">批注</button><button data-a="fav">收藏</button><button data-a="tr">翻译</button><button data-a="ask">问 AI</button><button class="x" data-a="x">×</button>';
+  void fBox;
 }
-document.addEventListener('selectionchange',()=>{ clearTimeout(_selTimer); _selTimer=setTimeout(maybeShowBar,60); });
-document.addEventListener('pointerdown',e=>{ if(!e.target.closest('#selBar')){ setTimeout(()=>{ const s=window.getSelection(); if(!s||s.isCollapsed) hideSelBar(); },140); } });
-// 工具条自身：阻止它触发上方隐藏逻辑
-let _barDown=false;
-document.addEventListener('pointerdown',e=>{ if(e.target.closest('#selBar')) _barDown=true; },true);
-$('selBar').addEventListener('pointerup',()=>{ setTimeout(()=>{ _barDown=false; },200); });
+// 选区变化/点击空白统一判断是否关闭批注坞
+let _bubbleDown=false;
+document.addEventListener('selectionchange',()=>{ clearTimeout(_selTimer); _selTimer=setTimeout(maybeShowBar,80); });
+document.addEventListener('pointerdown',e=>{
+  if(e.target.closest('#selBar')) { _bubbleDown=true; return; }
+  setTimeout(()=>{ const s=window.getSelection(); if(!s||s.isCollapsed) hideSelBar(); },180);
+},true);
+document.addEventListener('click',()=>{ if(_bubbleDown){ _bubbleDown=false; } });
+$('selBar').addEventListener('pointerdown',e=>e.stopPropagation());
 $('selBar').addEventListener('mousedown',e=>e.preventDefault());
 $('selBar').addEventListener('click',async e=>{
   const tb=e.target.closest('button'); if(!tb||!SEL)return;
@@ -709,6 +709,7 @@ $('selBar').addEventListener('click',async e=>{
   else if(a==='fav'){ await addMaterial({kind:'material',note:'',quote:SEL.quote,spans:SEL.spans,para:SEL.para}); renderPage(); toast('已收藏为素材'); }
   else if(a==='tr'){ openTranslateModal(SEL.quote); }
   else if(a==='ask'){ openAskModal(SEL.quote); }
+  else if(a==='x'){ hideSelBar(); }
   hideSelBar();
 });
 async function addMaterial(o){
